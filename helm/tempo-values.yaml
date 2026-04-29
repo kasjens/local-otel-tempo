@@ -1,0 +1,39 @@
+# Tempo monolithic mode — single pod, local filesystem storage.
+# Perfect for a laptop demo. Do not use in production.
+
+tempo:
+  # OTLP receivers on the standard ports.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+
+  # Keep traces around long enough to be useful while exploring.
+  retention: 24h
+
+# Persist data across pod restarts. EmptyDir would also work for a pure demo,
+# but a small PVC means traces survive `kubectl rollout restart`.
+persistence:
+  enabled: true
+  size: 2Gi
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+
+service:
+  type: ClusterIP

@@ -1,0 +1,165 @@
+# OpenTelemetry Collector (contrib distribution).
+#
+# Pipeline shape:
+#
+#   otlp receiver
+#     │
+#     ▼
+#   [k8sattributes, resourcedetection, batch]
+#     │
+#     ├──▶ otlp/tempo                           (raw spans → Tempo)
+#     ├──▶ servicegraph connector ─┐
+#     ├──▶ spanmetrics  connector ─┤
+#     └──▶ debug                   │
+#                                  ▼
+#                       metrics pipeline
+#                                  │
+#                                  ▼
+#                       prometheusremotewrite ──▶ Prometheus
+#
+# The two "connectors" (spanmetrics, servicegraph) take traces in and emit
+# metrics out — that's what makes the service graph in Grafana work without
+# bolting metrics-generator onto Tempo.
+
+mode: deployment
+replicaCount: 1
+
+# Use the contrib image so we have resourcedetection + k8sattributes
+# processors and the spanmetrics/servicegraph connectors available.
+image:
+  repository: otel/opentelemetry-collector-contrib
+
+# k8sattributes processor needs RBAC to read pods/namespaces/nodes.
+presets:
+  kubernetesAttributes:
+    enabled: true
+
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    servicePort: 4317
+    protocol: TCP
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    servicePort: 4318
+    protocol: TCP
+  # Disable the receivers we don't use to keep the surface small.
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+  metrics:
+    enabled: false
+
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+  processors:
+    batch:
+      send_batch_size: 512
+      timeout: 2s
+
+    # Detect host attributes from the underlying node:
+    #   host.name, host.os.type, host.arch, ...
+    resourcedetection:
+      detectors: [env, system]
+      timeout: 2s
+      override: false
+
+    # Add k8s metadata (pod, namespace, node, deployment, ...) by looking up
+    # the sender's IP against the k8s API. The "kubernetesAttributes" preset
+    # above wires the RBAC for this.
+    k8sattributes:
+      auth_type: serviceAccount
+      passthrough: false
+      extract:
+        metadata:
+          - k8s.pod.name
+          - k8s.pod.uid
+          - k8s.deployment.name
+          - k8s.namespace.name
+          - k8s.node.name
+          - k8s.pod.start_time
+
+  # Connectors are receivers and exporters at once: they consume telemetry
+  # from one pipeline and emit derived telemetry into another.
+  connectors:
+    # Produces RED-style request metrics (rate, error, duration) per service
+    # by inspecting span timing/status.
+    spanmetrics:
+      histogram:
+        explicit:
+          buckets: [2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s]
+      dimensions:
+        - name: http.method
+        - name: http.status_code
+      exemplars:
+        enabled: true
+
+    # Produces edges of the service graph by pairing client and server spans.
+    servicegraph:
+      latency_histogram_buckets:
+        [2ms, 6ms, 10ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s]
+      dimensions:
+        - service.namespace
+
+  exporters:
+    otlp/tempo:
+      endpoint: tempo.observability.svc.cluster.local:4317
+      tls:
+        insecure: true
+
+    # Push the metrics produced by the two connectors into Prometheus via
+    # remote_write (Prometheus is started with the receiver enabled — see
+    # helm/prometheus-values.yaml).
+    prometheusremotewrite:
+      endpoint: http://prometheus-server.observability.svc.cluster.local:80/api/v1/write
+      tls:
+        insecure: true
+      # Send target_info samples so Prometheus knows which resource each
+      # series belongs to (service.name, k8s.namespace.name, ...).
+      target_info:
+        enabled: true
+
+    # Mirror traces to stdout so `kubectl logs` shows what flows through.
+    debug:
+      verbosity: basic
+
+  service:
+    pipelines:
+      traces:
+        receivers:  [otlp]
+        processors: [k8sattributes, resourcedetection, batch]
+        # Note: exporting to a connector here makes those traces available
+        # as the connector's "input" for its metrics output.
+        exporters:  [otlp/tempo, spanmetrics, servicegraph, debug]
+
+      # The two connectors emit metrics; this pipeline collects and exports
+      # them to Prometheus.
+      metrics:
+        receivers:  [spanmetrics, servicegraph]
+        processors: [batch]
+        exporters:  [prometheusremotewrite]
+
+    telemetry:
+      logs:
+        level: info
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 384Mi

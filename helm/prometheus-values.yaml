@@ -1,0 +1,42 @@
+# Minimal Prometheus — receives metrics that the OTel collector pushes via
+# remote_write. We disable every component the chart bundles by default
+# (alertmanager, pushgateway, node-exporter, kube-state-metrics) because
+# this Prometheus exists only to be the destination for the collector's
+# spanmetrics + servicegraph connectors.
+
+server:
+  extraFlags:
+    - web.enable-lifecycle
+    - web.enable-remote-write-receiver
+
+  # Short retention is fine — service graph metrics are derived continuously
+  # from live traces, no need to keep history.
+  retention: "6h"
+
+  persistentVolume:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+
+  service:
+    type: ClusterIP
+
+# Empty rule files — we don't run any alerts.
+serverFiles:
+  alerting_rules.yml: {}
+  recording_rules.yml: {}
+
+# Strip everything else.
+alertmanager:
+  enabled: false
+prometheus-pushgateway:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+kube-state-metrics:
+  enabled: false

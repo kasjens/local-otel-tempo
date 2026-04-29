@@ -1,0 +1,79 @@
+# Grafana with anonymous Admin access (no login on http://localhost:3000)
+# and the Tempo + Prometheus datasources pre-wired.
+
+# Service answers on port 80; the Traefik ingress below routes to it.
+service:
+  type: ClusterIP
+  port: 80
+
+# Routing path:
+#   host:3000  →  k3d loadbalancer:80 (see scripts/up.sh --port flag)
+#              →  Traefik (built into k3s, watches Ingress resources)
+#              →  this Ingress (matches any host header)
+#              →  grafana svc → grafana pod
+ingress:
+  enabled: true
+  ingressClassName: traefik
+  hosts:
+    - ""        # empty host → match any Host header (fine for localhost demo)
+  path: /
+  pathType: Prefix
+
+grafana.ini:
+  auth.anonymous:
+    enabled: true
+    org_role: Admin     # Admin on a local demo cluster is fine; lets you
+                        # edit dashboards without logging in.
+  auth:
+    disable_login_form: true
+  security:
+    allow_embedding: true
+  server:
+    root_url: "%(protocol)s://%(domain)s:%(http_port)s/"
+
+# Disable the chart's admin secret since we're anonymous-only.
+admin:
+  existingSecret: ""
+
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Tempo
+        type: tempo
+        access: proxy
+        # Tempo's query HTTP API is on 3200 in the grafana/tempo chart
+        # (not 3100, which is the upstream Tempo binary default).
+        url: http://tempo.observability.svc.cluster.local:3200
+        uid: tempo
+        isDefault: true
+        jsonData:
+          httpMethod: GET
+          # The Service Graph tab in Explore queries Prometheus, not Tempo.
+          # We point it at the Prometheus we deploy alongside Tempo — the
+          # OTel collector populates the relevant metrics there.
+          serviceMap:
+            datasourceUid: prometheus
+          nodeGraph:
+            enabled: true
+          search:
+            hide: false
+          tracesToLogs:
+            datasourceUid: ""
+
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus-server.observability.svc.cluster.local
+        uid: prometheus
+        isDefault: false
+        jsonData:
+          httpMethod: POST
+          timeInterval: 15s
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi

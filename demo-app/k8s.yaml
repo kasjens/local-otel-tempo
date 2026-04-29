@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  labels:
+    app: demo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+    spec:
+      containers:
+        - name: demo-app
+          image: demo-app:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: demo-app
+            # Send traces to the collector in the observability namespace.
+            # We use 4317 (OTLP/gRPC) — that's the default the SDK assumes.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: grpc
+            # These show up as resource attributes on every span.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: service.namespace=demo,deployment.environment=local
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              memory: 192Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app
+  labels:
+    app: demo-app
+spec:
+  selector:
+    app: demo-app
+  ports:
+    - port: 80
+      targetPort: 8000
+      name: http
